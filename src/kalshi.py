@@ -21,7 +21,7 @@ import logging
 class Kalshi:
     def __init__(self, config):
         load_dotenv(".env")
-        self.client = KalshiClient.from_env(demo=True)
+        self.client = KalshiClient.from_env(demo=False)
 
         self.events = None
         self.positions = {}
@@ -36,9 +36,8 @@ class Kalshi:
         print(f"Got {len(self.series)} markets from {series}")
         return self.series
     
-    
                     
-    
+
     def get_mulitple_markets(self, limit=1, series=["KXNBAGAME"], mve_filter="exclude"):
         merged = []
         for s in series:
@@ -232,6 +231,7 @@ class Kalshi:
         logging.basicConfig(level=logging.WARNING)
 
         self.events = list(self.events)
+        
         print(f"[START] strategy_high_trade | events={len(self.events)}")
 
         last_tick_print = {}  # per-ticker throttling
@@ -247,6 +247,7 @@ class Kalshi:
 
             @feed.on("ticker")
             def handle_ticker(msg: TickerMessage):
+                #print(msg)
                 try:
                     ticker = msg.market_ticker
 
@@ -301,26 +302,28 @@ class Kalshi:
                             print(f"[SL] SELL NO  {ticker} @ {no_bid:.2f}")
                             self.sell(ticker, Side.NO, no_bid)
                             self.close_position(msg, no_bid, "NO")
+                        
+                    try:
+                        if yes_bid == 0:
+                            ticker = msg.market_ticker
+                            print(f"[LIFE] {ticker} | RESOLVED result=NO")
+                            if ticker in self.events:
+                                self.events.remove(ticker)
+                                self.close_position(msg,1,'NO')
+                        if no_bid == 0:
+                            ticker = msg.market_ticker
+                            print(f"[LIFE] {ticker} | RESOLVED result=YES")
+                            if ticker in self.events:
+                                self.events.remove(ticker)
+                                self.close_position(msg,1,'YES')
+                    except Exception as e:
+                        print(f"[ERR][lifecycle] {type(e).__name__}: {e}")
 
                 except Exception as e:
                     print(f"[ERR][ticker] {type(e).__name__}: {e}")
 
-            @feed.on("market_lifecycle")
-            def handle_lifecycle(msg):
-                try:
-                    ticker = msg.market_ticker
-                    status = msg.status
-                    result = msg.result
-                    if status and status != "active":
-                        print(f"[LIFE] {ticker} | status={status} result={result}")
-                        if ticker in self.events:
-                            self.events.remove(ticker)
-                            self.close_position(msg,1,result)
-                except Exception as e:
-                    print(f"[ERR][lifecycle] {type(e).__name__}: {e}")
-
+                
             feed.subscribe("ticker", market_tickers=self.events)
-            feed.subscribe("market_lifecycle", market_tickers=self.events)
 
             # Wait for connect
             for _ in range(20):

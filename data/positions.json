@@ -1,3 +1,34 @@
 {
- 
+ "KXATPMATCH-26FEB12MANSHE-SHE": {
+    "dir": "yes",
+    "price": 0.84
+ },
+ "KXWTAMATCH-26FEB12SWISAK-SWI": {
+    "dir": "yes",
+    "price": 0.90
+ },
+ "KXATPMATCH-26FEB12DEWAW-WAW": {
+    "dir": "no",
+    "price": 0.90
+ },
+ "KXATPCHALLENGERMATCH-26FEB12BARNAG-NAG":{
+    "dir": "yes",
+    "price": 0.88
+ },
+ "KXATPCHALLENGERMATCH-26FEB12GALKEN-KEN":{
+    "dir": "no",
+    "price": 0.81
+ },
+ "KXATPCHALLENGERMATCH-26FEB12KOLVAN-VAN":{
+    "dir": "yes",
+    "price": 0.82
+ },
+ "KXATPMATCH-26FEB12HUMDEN-HUM": {
+    "dir": "yes",
+    "price": 0.86
+ },
+ "KXATPCHALLENGERMATCH-26FEB12SIMSEK-SEK":{
+    "dir": "no",
+    "price": 0.81
+ }
 }

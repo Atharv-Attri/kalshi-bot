@@ -226,6 +226,9 @@ class Kalshi:
         order = self.client.portfolio.cancel_order(order_id=order.order_id)
         return order
 
+    def test(self):
+        bal = self.client.portfolio.get_balance()
+        return bal.portfolio_value
     
     async def strategy_high_trade(self):
         logging.basicConfig(level=logging.WARNING)
@@ -248,6 +251,9 @@ class Kalshi:
             @feed.on("ticker")
             def handle_ticker(msg: TickerMessage):
                 #print(msg)
+                if self.test() < 1000:
+                    print("[red bold]BALANCE ERROR EXITING....")
+                    exit()
                 try:
                     ticker = msg.market_ticker
 

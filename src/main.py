@@ -17,8 +17,8 @@ async def main(CONFIG):
     #kalshi.buy("KXNCAAMBGAME-26FEB11MICHNW-NW", Side.NO, 0.80)
     #kalshi.buy("KXNCAAMBGAME-26FEB11LIBNMSU-LIB", Side.NO, 0.45)
 
-    #await kalshi.test()
-    await kalshi.strategy_high_trade()
+    await kalshi.test()
+    #await kalshi.strategy_high_trade()
     # kalshi.gen_financials()
 
 

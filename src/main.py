@@ -8,25 +8,24 @@ from pykalshi import Side
 async def main(CONFIG):
     kalshi = Kalshi(CONFIG)
 
-    markets = kalshi.get_mulitple_markets(500, series=[series.ATP, series.ATO])
-#
+    markets = kalshi.get_mulitple_markets(500, series=[series.NBA, series.NCAA_BB_M, series.NCAA_BB_W])
     #print(markets[0])
-    #markets = kalshi.filter_by_today(markets, True)
-    #events = kalshi.get_unique_events(markets, save=True)
-    #print(events)
+    markets = kalshi.filter_by_today(markets, True)
+    events = kalshi.get_unique_events(markets, save=True)
+    print(events)
     #kalshi.buy("KXNCAAMBGAME-26FEB11MICHNW-NW", Side.NO, 0.80)
     #kalshi.buy("KXNCAAMBGAME-26FEB11LIBNMSU-LIB", Side.NO, 0.45)
 
-    await kalshi.test()
-    #await kalshi.strategy_high_trade()
+    #await kalshi.test()
+    await kalshi.strategy_yes_only()
     # kalshi.gen_financials()
 
 
 if __name__ == "__main__":
     CONFIG = SimpleNamespace(**{
-        "L_LIMIT": 0.80,
-        "U_LIMIT": 0.95,
-        "SL": 0.50,
+        "L_LIMIT": 0.85,
+        "U_LIMIT": 0.93,
+        "SL": 0.75,
         "QTY": 25,
     })
 

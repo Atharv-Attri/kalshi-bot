@@ -16,7 +16,7 @@ from pykalshi import Feed, TickerMessage, Action, Side, OrderType, TimeInForce
 import asyncio
 import logging
 from collections import deque
-
+from CFB import CFB
 
 
 class Kalshi:
@@ -26,7 +26,7 @@ class Kalshi:
 
         self.events = None
         self.positions = {}
-        self.load_positions()
+        #self.load_positions()
         self.CONFIG = config
 
         self.pt = pytz.timezone("America/Los_Angeles")
@@ -54,8 +54,6 @@ class Kalshi:
         print(f"Got {len(self.series)} markets from {series}")
         return self.series
     
-                    
-
     def get_mulitple_markets(self, limit=1, series=["KXNBAGAME"], mve_filter="exclude"):
         merged = []
         for s in series:
@@ -100,7 +98,6 @@ class Kalshi:
 
         return tmp
 
-    
     def load_events(self):
         with open("./../data/events.json", "r") as f:
             self.events = json.load(f)
@@ -125,7 +122,6 @@ class Kalshi:
             "yes_bid_dollars": float(r['markets'][0]["yes_bid_dollars"]),
         }
     
-
     def load_positions(self):
         with open("./../data/positions.json", "r") as f:
             self.positions = json.load(f)
@@ -158,7 +154,6 @@ class Kalshi:
         ])
         print(f"[green]Closed position:\n\t{msg.market_ticker} is a {pos['dir'].upper()} @ ${price}\t=>\t${diff} P&L")
 
-
     def logger(self, message):
         writer(open("./../data/log.csv", "a")).writerow(message)
 
@@ -169,7 +164,6 @@ class Kalshi:
     def checkpoint(self):
         json.dump(self.positions, open("./../data/checkpoint.json", "w"), indent=1)
         json.dump(list(self.events), open("./../data/checkpoint.json", "a"), indent=1)
-    
     
     def strategy_high(self):
         self.events = list(self.events)
@@ -368,7 +362,6 @@ class Kalshi:
 
         print("[EXIT] strategy_high_trade")
 
-
     def open_position_yes(self, msg: TickerMessage, price: float):
         # store positions keyed by market_ticker
         self.positions[msg.market_ticker] = {
@@ -393,7 +386,6 @@ class Kalshi:
         if ticker in self.events:
             self.events.remove(ticker)
     
-
     def _push_px(self, ticker: str, yes_ask: float):
         now = utime()
         dq = self._px_hist.get(ticker)
@@ -429,15 +421,38 @@ class Kalshi:
 
 
     async def strategy_yes_only(self):
-        logging.basicConfig(level=logging.WARNING)
+        def get_btc_markets():
+            """
+            Fetch the current BTC market (KXBTC15M) and return its ticker list
+            and the next expiry timestamp with a small buffer.
+            """
+            mkts = self.client.get_markets(
+                limit=1,
+                mve_filter="exclude",
+                status=MarketStatus.OPEN,
+                series_ticker="KXBTC15M",
+            )
 
-        # ensure we have a list of market tickers
-        self.events = list(self.events)
+            if not mkts:
+                print("[MKT] No open KXBTC15M markets found, will retry later.")
+                # if nothing is open, push next_exp a bit into the future
+                return [], utime() + 60
 
-        # "seen" prevents re-entry after fills or restarts
+            d = mkts[0]
+            exp_ts = int(parser.isoparse(d.close_time).timestamp())
+            # small buffer so we refresh after close
+            exp_ts += 90
+
+            print(f"[MKT] Using BTC market {d.ticker} close={d.close_time}")
+            return [d.ticker], exp_ts
+
+        # initial BTC market pull
+        self.events, next_exp = get_btc_markets()
+
+        # "seen" prevents re entry after fills or restarts
         self.seen = set(self.positions.keys())
 
-        # if we already have a position, don't subscribe that ticker
+        # if we already have a position, do not subscribe that ticker
         for t in list(self.seen):
             if t in self.events:
                 self.events.remove(t)
@@ -446,18 +461,63 @@ class Kalshi:
 
         last_tick_print = {}
 
-        def log_tick(ticker: str, yes_bid: float, yes_ask: float):
+        def log_tick(ticker: str, yes_bid, yes_ask, no_bid, no_ask):
             now = utime()
             if now - last_tick_print.get(ticker, 0) >= 1.0:
                 last_tick_print[ticker] = now
-                print(f"[TICK] {ticker} | YES bid/ask={yes_bid:.2f}/{yes_ask:.2f}")
+
+                def fmt(v):
+                    return f"{v:.2f}" if v is not None else "None"
+
+                print(
+                    f"[TICK] {ticker} | "
+                    f"YES bid/ask={fmt(yes_bid)}/{fmt(yes_ask)} "
+                    f"NO bid/ask={fmt(no_bid)}/{fmt(no_ask)}"
+                )
+
+        if not self.events:
+            print("[WARN] No BTC events to subscribe to. Exiting strategy_yes_only.")
+            return
 
         with Feed(self.client) as feed:
 
             @feed.on("ticker")
             def handle_ticker(msg: TickerMessage):
+                nonlocal next_exp
+
                 try:
+                    # auto refresh BTC market when current one is done
+                    if utime() > next_exp:
+                        print("[REFRESH] Refreshing BTC market list...")
+                        try:
+                            if self.events:
+                                feed.unsubscribe("ticker", market_tickers=self.events)
+                        except Exception as e:
+                            print(f"[REFRESH][WARN] Unsubscribe error: {e}")
+
+                        # fetch new BTC market
+                        new_events, new_next_exp = get_btc_markets()
+
+                        # do not subscribe tickers where we already have positions
+                        for t in list(self.positions.keys()):
+                            if t in new_events:
+                                new_events.remove(t)
+
+                        self.events = new_events
+                        next_exp = new_next_exp
+
+                        if self.events:
+                            feed.subscribe("ticker", market_tickers=self.events)
+                            print(f"[REFRESH] Now subscribed to: {self.events}")
+                        else:
+                            print("[REFRESH] No BTC events to subscribe to after refresh.")
+                            return
+
                     ticker = msg.market_ticker
+
+                    # if this ticker is not in our current universe and not in open positions, ignore
+                    if ticker not in self.events and ticker not in self.positions:
+                        return
 
                     # quick balance check, but do not call twice
                     bal = self.get_balance_cached()
@@ -465,73 +525,156 @@ class Kalshi:
                         print(f"[red bold]{bal}  -  BALANCE ERROR EXITING....")
                         raise SystemExit
 
+                    # require at least YES prices to do anything
                     if msg.yes_bid is None or msg.yes_ask is None:
                         return
 
                     yes_bid = msg.yes_bid / 100
                     yes_ask = msg.yes_ask / 100
+
+                    # NO prices may be missing on some ticks, so guard them
+                    no_bid = msg.no_bid / 100 if getattr(msg, "no_bid", None) is not None else None
+                    no_ask = msg.no_ask / 100 if getattr(msg, "no_ask", None) is not None else None
+
+                    # keep pushing YES ask into your price history
                     self._push_px(ticker, yes_ask)
 
+                    log_tick(ticker, yes_bid, yes_ask, no_bid, no_ask)
 
-                    log_tick(ticker, yes_bid, yes_ask)
+                    pos = self.positions.get(ticker)
+                    side = None
+                    if pos is not None:
+                        # try both common keys, default to YES if missing
+                        side = pos.get("side") or pos.get("dir") or "YES"
 
-                    # skip wide spreads
-                    if (yes_ask - yes_bid) > 0.10:
-                        return
+                    # ENTRY LOGIC: can open either YES or NO, but only if no existing position
+                    if pos is None and ticker not in self.seen:
+                        entered = False
 
-                    # ENTRY: YES only
-                    if ticker not in self.positions and ticker not in self.seen:
-                        if self.CONFIG.L_LIMIT <= yes_ask <= self.CONFIG.U_LIMIT:
-                            if not self._approaching_from_below(ticker, self.CONFIG.L_LIMIT):
-                                return
+                        # 1) Try YES entry
+                        # skip wide YES spreads for entry
+                        if (yes_ask - yes_bid) <= 0.10:
+                            if self.CONFIG.L_LIMIT <= yes_ask <= self.CONFIG.U_LIMIT:
+                                if self._approaching_from_below(ticker, self.CONFIG.L_LIMIT):
+                                    px = min(1.00, max(0.01, round(yes_ask + 0.01, 2)))
+                                    print(f"[ENTRY] BUY YES {ticker} @ {px:.2f}")
+                                    order = self.buy(ticker, Side.YES, px)
 
-                            px = min(1.00, max(0.01, round(yes_ask + 0.01, 2)))
-                            print(f"[ENTRY] BUY YES {ticker} @ {px:.2f}")
-                            order = self.buy(ticker, Side.YES, px)
+                                    if getattr(order, "status", None) == "executed":
+                                        fill_px = float(order.yes_price / 100)
+                                        print(f"[FILL] YES {ticker} @ {fill_px:.2f}")
+                                        self.open_position_yes(msg, fill_px)
+                                        self.seen.add(ticker)
+                                        entered = True
 
-                            if getattr(order, "status", None) == "executed":
-                                fill_px = float(order.yes_price / 100)
-                                print(f"[FILL] YES {ticker} @ {fill_px:.2f}")
-                                self.open_position_yes(msg, fill_px)
-                                self.seen.add(ticker)
+                        # 2) If we did not enter YES, try NO side
+                        if not entered and no_bid is not None and no_ask is not None:
+                            # skip wide NO spreads for entry
+                            if (no_ask - no_bid) <= 0.10:
+                                if self.CONFIG.L_LIMIT <= no_ask <= self.CONFIG.U_LIMIT:
+                                    # add your own "approaching" logic for NO if you want
+                                    px = min(1.00, max(0.01, round(no_ask + 0.01, 2)))
+                                    print(f"[ENTRY] BUY NO {ticker} @ {px:.2f}")
+                                    order = self.buy(ticker, Side.NO, px)
+
+                                    if getattr(order, "status", None) == "executed":
+                                        # Kalshi returns yes_price, for NO you usually look at no_price
+                                        fill_px = None
+                                        if getattr(order, "no_price", None) is not None:
+                                            fill_px = float(order.no_price / 100)
+                                        elif getattr(order, "yes_price", None) is not None:
+                                            # in case only yes_price is provided
+                                            fill_px = float(order.yes_price / 100)
+
+                                        if fill_px is None:
+                                            fill_px = px
+
+                                        print(f"[FILL] NO {ticker} @ {fill_px:.2f}")
+                                        self.open_position_no(msg, fill_px)
+                                        self.seen.add(ticker)
+                                        entered = True
+
+                        # after entry attempt we are done with this tick
+                        if entered:
                             return
 
-
-                    # POSITION MANAGEMENT: YES only
+                    # refresh position info, since we might have just opened one
                     pos = self.positions.get(ticker)
-                    if not pos:
+                    if pos is None:
                         return
 
-                    # stop loss on bid
-                    if yes_bid < self.CONFIG.SL:
-                        px = round(yes_bid, 2)
-                        print(f"[SL] SELL YES {ticker} @ {px:.2f}")
-                        order = self.sell(ticker, Side.YES, px)
+                    side = pos.get("side") or pos.get("dir") or "YES"
 
-                        if getattr(order, "status", None) == "executed":
-                            # Prefer actual fill price from the order if present
-                            fill_px = px
-                            if getattr(order, "yes_price", None) is not None:
-                                fill_px = float(order.yes_price / 100)
+                    # STOP LOSS LOGIC
+                    if side == "YES":
+                        if yes_bid < self.CONFIG.SL:
+                            px = round(yes_bid, 2)
+                            print(f"[SL] SELL YES {ticker} @ {px:.2f}")
+                            order = self.sell(ticker, Side.YES, px)
 
-                            self.close_position_yes(msg, fill_px, reason="sl")
-                            self._maybe_remove_event(ticker)
-                            feed.unsubscribe("ticker", market_ticker=ticker)
-                        else:
-                            print(f"[WARN] SL sell not executed for {ticker} (status={getattr(order,'status',None)}). Keeping position open.")
+                            if getattr(order, "status", None) == "executed":
+                                fill_px = px
+                                if getattr(order, "yes_price", None) is not None:
+                                    fill_px = float(order.yes_price / 100)
 
-                        return
+                                self.close_position_yes(msg, fill_px, reason="sl")
+                                self._maybe_remove_event(ticker)
+                                feed.unsubscribe("ticker", market_ticker=ticker)
+                            else:
+                                print(
+                                    f"[WARN] SL sell not executed for {ticker} "
+                                    f"(status={getattr(order, 'status', None)}). Keeping position open."
+                                )
 
+                            return
 
-                    # lifecycle: use market.result instead of guessing from bid==0
+                    elif side == "NO":
+                        # For NO, value falls when YES becomes more likely
+                        # Stop if NO bid drops below SL
+                        if no_bid is not None and no_bid < self.CONFIG.SL:
+                            px = round(no_bid, 2)
+                            print(f"[SL] SELL NO {ticker} @ {px:.2f}")
+                            order = self.sell(ticker, Side.NO, px)
+
+                            if getattr(order, "status", None) == "executed":
+                                fill_px = px
+                                if getattr(order, "no_price", None) is not None:
+                                    fill_px = float(order.no_price / 100)
+
+                                self.close_position_no(msg, fill_px, reason="sl")
+                                self._maybe_remove_event(ticker)
+                                feed.unsubscribe("ticker", market_ticker=ticker)
+                            else:
+                                print(
+                                    f"[WARN] SL sell not executed for {ticker} "
+                                    f"(status={getattr(order, 'status', None)}). Keeping position open."
+                                )
+
+                            return
+
+                    # LIFECYCLE AND RESOLUTION
                     # poll only when it looks dead to avoid hammering API
-                    if yes_bid == 1 or yes_ask == 1:
+                    if (
+                        yes_bid == 1
+                        or yes_ask == 1
+                        or (no_bid == 1 if no_bid is not None else False)
+                        or (no_ask == 1 if no_ask is not None else False)
+                    ):
                         market = self.client.get_market(ticker)
-                        if getattr(market, "status", None) != "active":
-                            # if it resolved YES, payout is 1.00 else 0.00
-                            payout = 1.0 if getattr(market, "result", None) == "yes" else 0.0
-                            print(f"[LIFE] {ticker} | RESOLVED result={getattr(market,'result',None)} payout={payout:.2f}")
-                            self.close_position_yes(msg, payout, reason="resolved")
+                        status = getattr(market, "status", None)
+                        if status != "active":
+                            result = getattr(market, "result", None)
+
+                            if side == "YES":
+                                payout = 1.0 if result == "yes" else 0.0
+                                print(f"[LIFE] {ticker} | RESOLVED side=YES result={result} payout={payout:.2f}")
+                                self.close_position_yes(msg, payout, reason="resolved")
+
+                            elif side == "NO":
+                                payout = 1.0 if result == "no" else 0.0
+                                print(f"[LIFE] {ticker} | RESOLVED side=NO result={result} payout={payout:.2f}")
+                                self.close_position_no(msg, payout, reason="resolved")
+
                             self._maybe_remove_event(ticker)
                             feed.unsubscribe("ticker", market_ticker=ticker)
 
@@ -540,6 +683,7 @@ class Kalshi:
                 except Exception as e:
                     print(f"[ERR][ticker] {type(e).__name__}: {e}")
 
+            # initial subscribe
             feed.subscribe("ticker", market_tickers=self.events)
 
             # wait for connect
@@ -550,7 +694,8 @@ class Kalshi:
 
             print(f"[WS] connected={feed.is_connected} reconnects={feed.reconnect_count}")
 
-            while self.events:
+            # keep running, BTC markets will auto refresh
+            while True:
                 if round(utime()) % 60 == 0:
                     print(
                         f"[HB] connected={feed.is_connected} msgs={feed.messages_received} "
@@ -560,3 +705,151 @@ class Kalshi:
                 await asyncio.sleep(1)
 
         print("[EXIT] strategy_yes_only")
+
+
+    async def crypto_data(self):
+        # Kalshi series we care about
+        series = ["KXBTC15M"]
+
+        # one CSV per series
+        fname = {
+            "KXBTC15M": "./../data/KXBTC15M_data.csv",
+            "KXETH15M": "./../data/KXETH15M_data.csv",
+            "KXSOL15M": "./../data/KXSOL15M_data.csv",
+            "KXXRP15M": "./../data/KXXRP15M_data.csv",
+        }
+
+        files = {}
+        for s, path in fname.items():
+            files[s] = open(path, "a", buffering=128)
+
+        # start CFB aggregator
+        cfb = CFB()
+        asyncio.create_task(cfb.run(log_sampler=True))
+
+        # give it a moment to connect and fill
+        await asyncio.sleep(3)
+
+        def get_ticker():
+            """
+            Fetch the current top market for each series and build
+            a tickers dict keyed by series.
+            """
+            tickers = {}
+            sub = []
+
+            for s in series:
+                d = self.client.get_markets(
+                    limit=100,
+                    mve_filter="exclude",
+                    status=MarketStatus.OPEN,
+                    series_ticker=s,
+                )[0]
+
+                sub.append(d.ticker)
+                print(d)
+
+                tickers[s] = {
+                    "series": s,
+                    "ticker": d.ticker,
+                    "yes_bid": d.yes_bid,
+                    "yes_ask": d.yes_ask,
+                    "no_bid": d.no_bid,
+                    "no_ask": d.no_ask,
+                    "exp": int(parser.isoparse(d.close_time).timestamp()),
+                    "target": float(d.yes_sub_title.split("$")[1].replace(",", "")),
+                }
+
+            return tickers, sub
+
+        # initial fetch
+        tickers, sub = get_ticker()
+
+        # track the next expiry across all tickers
+        def compute_next_exp():
+            return min(t["exp"] for t in tickers.values()) + 90
+
+        next_exp = compute_next_exp()
+        print(next_exp)
+        with Feed(self.client) as feed:
+
+            @feed.on("ticker")
+            def handle_ticker(msg: TickerMessage):
+                try:
+                    nonlocal tickers, sub, next_exp
+                    # refresh markets when the soonest expiry has passed
+
+                    series_code = msg.market_ticker.split("-")[0]
+                    if series_code not in tickers:
+                        # not one of our four series
+                        return
+
+                    # base line for CSV
+                    this_exp = tickers[series_code]["exp"]
+                    line = {
+                        "timestamp": round(utime(), 2),
+                        "market_ticker": msg.market_ticker,
+                        "series": series_code,
+                        "yes_bid": msg.yes_bid,
+                        "yes_ask": msg.yes_ask,
+                        "no_bid": 100 - msg.yes_ask,
+                        "no_ask": 100 - msg.yes_bid,
+                        "price": None,
+                        "target": tickers[series_code]["target"],
+                        "exp": this_exp,
+                        "time_d": round(this_exp - utime(), 2),
+                        "price_d": None,
+                    }
+
+                    # map series to CFB asset getter
+                    if series_code == "KXBTC15M":
+                        p = cfb.get_btc()
+                    elif series_code == "KXETH15M":
+                        p = cfb.get_eth()
+                    elif series_code == "KXSOL15M":
+                        p = cfb.get_sol()
+                    elif series_code == "KXXRP15M":
+                        p = cfb.get_xrp()
+                    else:
+                        p = None
+
+                    # If the CFB feed has not populated yet for this asset
+                    if p is None:
+                        return
+
+                    line["price"] = p
+                    line["price_d"] = p - line["target"]
+
+                    f = files[series_code]
+                    f.write(",".join(str(v) for v in line.values()) + "\n")
+
+                except Exception as e:
+                    print(f"[ERR][ticker] {type(e).__name__}: {e}")
+
+            print(sub)
+            feed.subscribe("ticker", market_tickers=sub)
+
+            # wait for connect
+            for _ in range(20):
+                if feed.is_connected:
+                    break
+                await asyncio.sleep(0.5)
+
+            print(f"[WS] connected={feed.is_connected} reconnects={feed.reconnect_count}")
+            print(f"[START] crypto_data | subscribed={len(sub)}")
+
+            # keep alive
+            while True:
+                if round(utime()) % 5 == 0:
+                    print(
+                        f"[HB] connected={feed.is_connected} msgs={feed.messages_received} next_exp={next_exp - utime()} "
+                        f"last={feed.seconds_since_last_message}"
+                    )
+                if utime() > next_exp:
+                        print("Refreshing tickers...")
+                        feed.unsubscribe("ticker", market_tickers=sub)
+                        tickers, sub = get_ticker()
+                        feed.subscribe("ticker", market_tickers=sub)
+                        next_exp = compute_next_exp()
+                        print("New earliest expiry:", datetime.fromtimestamp(next_exp))
+                await asyncio.sleep(1)

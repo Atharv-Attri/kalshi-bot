@@ -7,6 +7,9 @@ series = SimpleNamespace(**{
     "ATP": "KXATPMATCH",
     "ATP_C": "KXATPCHALLENGERMATCH",
     "WTA": "KXWTAMATCH",
-    "WTA_C": "KXWTACHALLENGERMATCH"
-
+    "WTA_C": "KXWTACHALLENGERMATCH",
+    "BTC15": "KXBTC15M",
+    "ETH15": "KXETH15M",
+    "SOL15": "KXSOL15M",
+    "XRP15": "KXXRP15M",
 })

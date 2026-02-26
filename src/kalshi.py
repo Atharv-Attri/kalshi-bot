@@ -728,124 +728,168 @@ class Kalshi:
 
 
     async def crypto_data(self):
-        # Kalshi series we care about
-        series = ["KXBTC15M"]
+        """
+        Collect data for BTC 15 minute Kalshi markets, plus a continuous BTC price log.
 
-        # one CSV per series
-        fname = {
-            "KXBTC15M": "./../data/KXBTC15M_data.csv",
-            "KXETH15M": "./../data/KXETH15M_data.csv",
-            "KXSOL15M": "./../data/KXSOL15M_data.csv",
-            "KXXRP15M": "./../data/KXXRP15M_data.csv",
-        }
+        - Continuous BTC prices (from CFB) go to: ./../data/btc_prices.csv
+        - Kalshi KXBTC15M ticks go to:           ./../data/KXBTC15M_data.csv
+        """
 
-        files = {}
-        for s, path in fname.items():
-            files[s] = open(path, "a", buffering=128)
+        series_code = "KXBTC15M"
 
-        # start CFB aggregator
+        # File for Kalshi ticks
+        #timestamp,market_ticker,series,yes_bid,yes_ask,no_bid,no_ask,price,target,exp,time_d,price_d,volume,open_interest,dollar_volume,dollar_open_interest
+        kalshi_path = "./../data/KXBTC15M_data.csv"
+        kalshi_file = open(kalshi_path, "a", buffering=128)
+
+        # File for continuous BTC prices
+        #timestamp,price_coinbase,price_kraken,price_bitstamp,price_cryptocom,price_gemini,price_synth,spread_cb_bs,spread_cb_kr,spread_cb_cc,spread_cb_gm,spread_kr_bs,spread_kr_cc,spread_kr_gm,spread_bs_cc,spread_bs_gm,spread_cc_gm
+        btc_price_path = "./../data/btc_prices.csv"
+        btc_price_file = open(btc_price_path, "a")
+
+        # Start CFB aggregator (continuous crypto prices)
         cfb = CFB()
         asyncio.create_task(cfb.run(log_sampler=True))
 
-        # give it a moment to connect and fill
+        # Give it a moment to connect and fill
         await asyncio.sleep(3)
+
+        async def log_btc_prices():
+            """
+            Always on BTC price logger, independent of Kalshi ticks.
+            One row per second into btc_prices.csv with all fields from CFB.get_btc():
+
+            timestamp,price_coinbase,price_kraken,price_bitstamp,price_cryptocom,price_gemini,
+            price_synth,spread_cb_bs,spread_cb_kr,spread_cb_cc,spread_cb_gm,
+            spread_kr_bs,spread_kr_cc,spread_kr_gm,spread_bs_cc,spread_bs_gm,spread_cc_gm
+            """
+            while True:
+                try:
+                    info = cfb.get_btc()
+                except Exception as e:
+                    print(f"[ERR][log_btc_prices] {type(e).__name__}: {e}")
+                    await asyncio.sleep(1)
+                    continue
+
+                if info is not None:
+                    row = [
+                        round(info["timestamp"], 2),
+                        info["price_coinbase"],
+                        info["price_kraken"],
+                        info["price_bitstamp"],
+                        info["price_cryptocom"],
+                        info["price_gemini"],
+                        info["price_synth"],
+                        info["spread_cb_bs"],
+                        info["spread_cb_kr"],
+                        info["spread_cb_cc"],
+                        info["spread_cb_gm"],
+                        info["spread_kr_bs"],
+                        info["spread_kr_cc"],
+                        info["spread_kr_gm"],
+                        info["spread_bs_cc"],
+                        info["spread_bs_gm"],
+                        info["spread_cc_gm"],
+                    ]
+                    btc_price_file.write(",".join(str(v) for v in row) + "\n")
+
+                await asyncio.sleep(1)
+
+        # Start the continuous BTC price logger
+        asyncio.create_task(log_btc_prices())
 
         def get_ticker():
             """
-            Fetch the current top market for each series and build
-            a tickers dict keyed by series.
+            Fetch the current top BTC 15M market and build a ticker dict.
+            Returns:
+                tickers: dict keyed by series_code
+                sub: list of market_tickers to subscribe to
             """
             tickers = {}
             sub = []
 
-            for s in series:
-                d = self.client.get_markets(
-                    limit=100,
-                    mve_filter="exclude",
-                    status=MarketStatus.OPEN,
-                    series_ticker=s,
-                )[0]
+            markets = self.client.get_markets(
+                limit=100,
+                mve_filter="exclude",
+                status=MarketStatus.OPEN,
+                series_ticker=series_code,
+            )
 
-                sub.append(d.ticker)
-                print(d)
+            if not markets:
+                raise RuntimeError("No open markets returned for series KXBTC15M")
 
-                tickers[s] = {
-                    "series": s,
-                    "ticker": d.ticker,
-                    "yes_bid": d.yes_bid,
-                    "yes_ask": d.yes_ask,
-                    "no_bid": d.no_bid,
-                    "no_ask": d.no_ask,
-                    "exp": int(parser.isoparse(d.close_time).timestamp()),
-                    "target": float(d.yes_sub_title.split("$")[1].replace(",", "")),
-                }
+            d = markets[0]
+            sub.append(d.ticker)
+            print(d)
+
+            tickers[series_code] = {
+                "series": series_code,
+                "ticker": d.ticker,
+                "yes_bid": d.yes_bid,
+                "yes_ask": d.yes_ask,
+                "no_bid": d.no_bid,
+                "no_ask": d.no_ask,
+                "exp": int(parser.isoparse(d.close_time).timestamp()),
+                "target": float(d.yes_sub_title.split("$")[1].replace(",", "")),
+            }
 
             return tickers, sub
 
-        # initial fetch
+        # Initial fetch of market and subscription list
         tickers, sub = get_ticker()
 
-        # track the next expiry across all tickers
         def compute_next_exp():
+            # Track the next expiry across all tickers, plus 90 seconds buffer
             return min(t["exp"] for t in tickers.values()) + 90
 
         next_exp = compute_next_exp()
         print(next_exp)
+
         with Feed(self.client) as feed:
 
             @feed.on("ticker")
             def handle_ticker(msg: TickerMessage):
                 try:
                     nonlocal tickers, sub, next_exp
-                    # refresh markets when the soonest expiry has passed
 
-                    series_code = msg.market_ticker.split("-")[0]
-                    if series_code not in tickers:
-                        # not one of our four series
+                    # Ensure this is our BTC series
+                    code = msg.market_ticker.split("-")[0]
+                    if code != series_code:
                         return
 
-                    # base line for CSV
                     this_exp = tickers[series_code]["exp"]
+                    now_ts = round(utime(), 2)
+
                     line = {
-                        "timestamp": round(utime(), 2),
+                        "timestamp": now_ts,
                         "market_ticker": msg.market_ticker,
                         "series": series_code,
                         "yes_bid": msg.yes_bid,
                         "yes_ask": msg.yes_ask,
+                        # Synthetic no side from yes quotes
                         "no_bid": 100 - msg.yes_ask,
                         "no_ask": 100 - msg.yes_bid,
-                        "price": None,
+                        "price": None,  # filled from CFB
                         "target": tickers[series_code]["target"],
                         "exp": this_exp,
-                        "time_d": round(this_exp - utime(), 2),
+                        "time_d": round(this_exp - now_ts, 2),
                         "price_d": None,
                         "volume": msg.volume,
                         "open_interest": msg.open_interest,
                         "dollar_volume": msg.dollar_volume,
-                        "dollar_open_interest": msg.dollar_open_interest
+                        "dollar_open_interest": msg.dollar_open_interest,
                     }
 
-                    # map series to CFB asset getter
-                    if series_code == "KXBTC15M":
-                        p = cfb.get_btc()
-                    elif series_code == "KXETH15M":
-                        p = cfb.get_eth()
-                    elif series_code == "KXSOL15M":
-                        p = cfb.get_sol()
-                    elif series_code == "KXXRP15M":
-                        p = cfb.get_xrp()
-                    else:
-                        p = None
-
-                    # If the CFB feed has not populated yet for this asset
-                    if p is None:
+                    btc_info = cfb.get_btc()
+                    if btc_info is None:
                         return
 
-                    line["price"] = p
-                    line["price_d"] = p - line["target"]
+                    price_synth = btc_info["price_synth"]
 
-                    f = files[series_code]
-                    f.write(",".join(str(v) for v in line.values()) + "\n")
+                    line["price"] = price_synth
+                    line["price_d"] = price_synth - line["target"]
+
+                    kalshi_file.write(",".join(str(v) for v in line.values()) + "\n")
 
                 except Exception as e:
                     print(f"[ERR][ticker] {type(e).__name__}: {e}")
@@ -853,27 +897,34 @@ class Kalshi:
             print(sub)
             feed.subscribe("ticker", market_tickers=sub)
 
-            # wait for connect
+            # Wait for websocket to connect
             for _ in range(20):
                 if feed.is_connected:
                     break
                 await asyncio.sleep(0.5)
 
-            print(f"[WS] connected={feed.is_connected} reconnects={feed.reconnect_count}")
+            print(
+                f"[WS] connected={feed.is_connected} "
+                f"msgs={feed.messages_received} next_exp={next_exp - utime()} "
+                f"last={feed.seconds_since_last_message}"
+            )
             print(f"[START] crypto_data | subscribed={len(sub)}")
 
-            # keep alive
+            # Main keep alive loop
             while True:
                 if round(utime()) % 5 == 0:
                     print(
-                        f"[HB] connected={feed.is_connected} msgs={feed.messages_received} next_exp={next_exp - utime()} "
+                        f"[HB] connected={feed.is_connected} "
+                        f"msgs={feed.messages_received} next_exp={next_exp - utime()} "
                         f"last={feed.seconds_since_last_message}"
                     )
+
                 if utime() > next_exp:
-                        print("Refreshing tickers...")
-                        feed.unsubscribe("ticker", market_tickers=sub)
-                        tickers, sub = get_ticker()
-                        feed.subscribe("ticker", market_tickers=sub)
-                        next_exp = compute_next_exp()
-                        print("New earliest expiry:", datetime.fromtimestamp(next_exp))
+                    print("Refreshing tickers...")
+                    feed.unsubscribe("ticker", market_tickers=sub)
+                    tickers, sub = get_ticker()
+                    feed.subscribe("ticker", market_tickers=sub)
+                    next_exp = compute_next_exp()
+                    print("New earliest expiry:", datetime.fromtimestamp(next_exp))
+
                 await asyncio.sleep(1)

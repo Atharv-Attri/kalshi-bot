@@ -277,10 +277,7 @@ if __name__ == "__main__":
 
         while True:
             print(
-                "BTC:", cfb.get_btc(),
-                "ETH:", cfb.get_eth(),
-                "SOL:", cfb.get_sol(),
-                "XRP:", cfb.get_xrp()
+                "BTC:", cfb.get_btc()
             )
             await asyncio.sleep(1)
 

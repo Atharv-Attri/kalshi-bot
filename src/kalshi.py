@@ -198,9 +198,9 @@ class Kalshi:
 
     def buy(self, ticker, side, max):
         if side == Side.NO:
-            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=1, no_price=int(max*100), time_in_force=TimeInForce.GTC)
+            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=10, no_price=int(max*100), time_in_force=TimeInForce.GTC)
         else:
-            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=1, yes_price=int(max*100), time_in_force=TimeInForce.GTC)
+            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=10, yes_price=int(max*100), time_in_force=TimeInForce.GTC)
         
         if order.status == "executed":
             return order
@@ -215,9 +215,9 @@ class Kalshi:
 
     def sell(self, ticker, side, max):
         if side == Side.NO:
-            order = self.client.portfolio.place_order(ticker, Action.SELL, side, count = 1,no_price=int(max*100), time_in_force=TimeInForce.GTC)
+            order = self.client.portfolio.place_order(ticker, Action.SELL, side, count = 10,no_price=int(max*100), time_in_force=TimeInForce.GTC)
         else: 
-            order = self.client.portfolio.place_order(ticker, Action.SELL, side, count = 1, yes_price=int(max*100), time_in_force=TimeInForce.GTC)
+            order = self.client.portfolio.place_order(ticker, Action.SELL, side, count = 10, yes_price=int(max*100), time_in_force=TimeInForce.GTC)
 
         if order.status == "executed":
             return order
@@ -365,11 +365,20 @@ class Kalshi:
     def open_position_yes(self, msg: TickerMessage, price: float):
         # store positions keyed by market_ticker
         self.positions[msg.market_ticker] = {
-            "dir": "yes",
+            "dir": "YES",
             "price": float(price),
         }
         self.logger([msg.market_ticker, "YES", "open", float(price), 0])
         print(f"[green]New position:\n\t{msg.market_ticker} is a YES @ ${price:.2f}")
+
+    def open_position_no(self, msg: TickerMessage, price: float):
+        # store positions keyed by market_ticker
+        self.positions[msg.market_ticker] = {
+            "dir": "NO",
+            "price": float(price),
+        }
+        self.logger([msg.market_ticker, "no", "open", float(price), 0])
+        print(f"[green]New position:\n\t{msg.market_ticker} is a NO @ ${price:.2f}")
 
     def close_position_yes(self, msg: TickerMessage, price: float, reason: str = "close"):
         pos = self.positions.pop(msg.market_ticker, None)
@@ -379,6 +388,16 @@ class Kalshi:
         self.logger([msg.market_ticker, "YES", reason, float(price), diff])
         print(
             f"[green]Closed position:\n\t{msg.market_ticker} YES @ ${price:.2f}\t=>\t${diff} P&L"
+        )
+
+    def close_position_no(self, msg: TickerMessage, price: float, reason: str = "close"):
+        pos = self.positions.pop(msg.market_ticker, None)
+        if pos is None:
+            return
+        diff = round(float(price) - float(pos["price"]), 4)
+        self.logger([msg.market_ticker, "NO", reason, float(price), diff])
+        print(
+            f"[green]Closed position:\n\t{msg.market_ticker} NO @ ${price:.2f}\t=>\t${diff} P&L"
         )
 
     def _maybe_remove_event(self, ticker: str):
@@ -487,31 +506,7 @@ class Kalshi:
 
                 try:
                     # auto refresh BTC market when current one is done
-                    if utime() > next_exp:
-                        print("[REFRESH] Refreshing BTC market list...")
-                        try:
-                            if self.events:
-                                feed.unsubscribe("ticker", market_tickers=self.events)
-                        except Exception as e:
-                            print(f"[REFRESH][WARN] Unsubscribe error: {e}")
-
-                        # fetch new BTC market
-                        new_events, new_next_exp = get_btc_markets()
-
-                        # do not subscribe tickers where we already have positions
-                        for t in list(self.positions.keys()):
-                            if t in new_events:
-                                new_events.remove(t)
-
-                        self.events = new_events
-                        next_exp = new_next_exp
-
-                        if self.events:
-                            feed.subscribe("ticker", market_tickers=self.events)
-                            print(f"[REFRESH] Now subscribed to: {self.events}")
-                        else:
-                            print("[REFRESH] No BTC events to subscribe to after refresh.")
-                            return
+                    
 
                     ticker = msg.market_ticker
 
@@ -533,8 +528,8 @@ class Kalshi:
                     yes_ask = msg.yes_ask / 100
 
                     # NO prices may be missing on some ticks, so guard them
-                    no_bid = msg.no_bid / 100 if getattr(msg, "no_bid", None) is not None else None
-                    no_ask = msg.no_ask / 100 if getattr(msg, "no_ask", None) is not None else None
+                    no_bid = (1 - yes_ask)
+                    no_ask = (1 - yes_bid)
 
                     # keep pushing YES ask into your price history
                     self._push_px(ticker, yes_ask)
@@ -548,7 +543,7 @@ class Kalshi:
                         side = pos.get("side") or pos.get("dir") or "YES"
 
                     # ENTRY LOGIC: can open either YES or NO, but only if no existing position
-                    if pos is None and ticker not in self.seen:
+                    if pos is None:
                         entered = False
 
                         # 1) Try YES entry
@@ -702,6 +697,31 @@ class Kalshi:
                         f"last={feed.seconds_since_last_message}"
                     )
                     self.checkpoint()
+                if utime() > next_exp:
+                    print("[REFRESH] Refreshing BTC market list...")
+                    try:
+                        if self.events:
+                            feed.unsubscribe("ticker", market_tickers=self.events)
+                    except Exception as e:
+                        print(f"[REFRESH][WARN] Unsubscribe error: {e}")
+
+                    # fetch new BTC market
+                    new_events, new_next_exp = get_btc_markets()
+
+                    # do not subscribe tickers where we already have positions
+                    for t in list(self.positions.keys()):
+                        if t in new_events:
+                            new_events.remove(t)
+
+                    self.events = new_events
+                    next_exp = new_next_exp
+
+                    if self.events:
+                        feed.subscribe("ticker", market_tickers=self.events)
+                        print(f"[REFRESH] Now subscribed to: {self.events}")
+                    else:
+                        print("[REFRESH] No BTC events to subscribe to after refresh.")
+                        return
                 await asyncio.sleep(1)
 
         print("[EXIT] strategy_yes_only")
@@ -799,6 +819,10 @@ class Kalshi:
                         "exp": this_exp,
                         "time_d": round(this_exp - utime(), 2),
                         "price_d": None,
+                        "volume": msg.volume,
+                        "open_interest": msg.open_interest,
+                        "dollar_volume": msg.dollar_volume,
+                        "dollar_open_interest": msg.dollar_open_interest
                     }
 
                     # map series to CFB asset getter

@@ -198,7 +198,7 @@ class Kalshi:
 
     def buy(self, ticker, side, max):
         if side == Side.NO:
-            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=10, no_price=int(max*100), time_in_force=TimeInForce.GTC)
+            order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=10, no_price=int(max*100), time_in_force=TimeInForce.GTC, )
         else:
             order = self.client.portfolio.place_order(ticker, Action.BUY, side, count=10, yes_price=int(max*100), time_in_force=TimeInForce.GTC)
         

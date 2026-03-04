@@ -8,6 +8,9 @@ from dateutil import parser
 from time import time as utime
 from datetime import datetime
 
+import time
+import uuid
+
 from pykalshi import (
     MarketStatus,
     KalshiClient,
@@ -39,7 +42,7 @@ POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 class Arb:
     def __init__(self, auto_refresh: bool = True):
         # Detection and execution parameters
-        self.threshold = 0.09   # gross edge needed to trigger
+        self.threshold = 0.1   # gross edge needed to trigger
         self.qty = 7
         self.pad = 0.02         # padding added to both venues
         self.auto_refresh = auto_refresh
@@ -101,6 +104,12 @@ class Arb:
                 f.write(line)
         except Exception as e:
             print(f"[red]Failed to write arb.log: {e}[/red]")
+
+    # -------------------- Kalshi client_order_id helper --------------------
+
+    def _new_client_order_id(self, ticker: str, side_tag: str) -> str:
+        # Unique across rapid retries and across runs
+        return f"arb-{ticker}-{side_tag}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
 
     # -------------------- Redeem worker --------------------
 
@@ -278,6 +287,8 @@ class Arb:
         max_base_price is in dollars.
         """
         limit_cents = int((max_base_price + self.pad) * 100)
+        side_tag = "YES" if side == Side.YES else "NO"
+        client_order_id = self._new_client_order_id(ticker, side_tag)
 
         try:
             if side == Side.NO:
@@ -288,6 +299,7 @@ class Arb:
                     count=self.qty,
                     no_price=limit_cents,
                     time_in_force=TimeInForce.FOK,
+                    client_order_id=client_order_id,
                 )
             else:
                 order = self.kalshi.portfolio.place_order(
@@ -297,10 +309,11 @@ class Arb:
                     count=self.qty,
                     yes_price=limit_cents,
                     time_in_force=TimeInForce.FOK,
+                    client_order_id=client_order_id,
                 )
         except Exception as e:
-            print(f"[red]Kalshi FOK exception: {e}[/red]")
-            self._log_event(f"Kalshi FOK exception: {e}")
+            print(f"[red]Kalshi FOK exception: {str(e)}[/red]")
+            self._log_event(f"Kalshi FOK exception: {str(e)} client_order_id={client_order_id}")
             return None
 
         if order is None:
@@ -355,15 +368,6 @@ class Arb:
             if now - last_tick_print.get(ticker, 0) < 1.0:
                 return
             last_tick_print[ticker] = now
-
-            # Uncomment if you want printing
-            # def fmt(v):
-            #     return f"{v:.4f}" if v is not None else "None"
-            # print(
-            #     f"[KALSHI] {ticker} "
-            #     f"YES bid/ask={fmt(yes_bid)}/{fmt(yes_ask)} "
-            #     f"NO bid/ask={fmt(no_bid)}/{fmt(no_ask)}"
-            # )
 
         with Feed(self.kalshi) as feed:
 
@@ -492,15 +496,6 @@ class Arb:
         else:
             return
 
-        # Uncomment if you want printing
-        # side = "YES" if asset_id == self.poly_yes_id else "NO"
-        # def fmt(v):
-        #     return f"{v:.4f}" if v is not None else "None"
-        # print(
-        #     f"[POLY] side={side} asset_id={asset_id} "
-        #     f"best_bid={fmt(bb)} best_ask={fmt(ba)}"
-        # )
-
     async def _arb_monitor_task(self, ticker: str, close_ts: int):
         """
         Continuously checks self.kalshi_book and self.poly_book for an arb
@@ -555,7 +550,7 @@ class Arb:
                     )
 
                 if not entered_poly and self.poly_condition_id is not None:
-                    # Strat 1 (FAVORED): NO Kalshi / YES Poly
+                    # Strat 1 (FAVORED): YES Poly / NO Kalshi
                     if gross_edge_no >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
                         poly_base_price = Py
 
@@ -592,7 +587,7 @@ class Arb:
                                 print(f"[yellow]{msg}[/yellow]")
                                 self._log_event(msg)
 
-                    # Strat 2: YES Kalshi / NO Poly
+                    # Strat 2: NO Poly / YES Kalshi
                     elif gross_edge_yes >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
                         poly_base_price = Pn
 

@@ -713,7 +713,7 @@ class Arb:
             close_ts = int(parser.isoparse(market.close_time).timestamp())
 
             print(f"[cyan]v2: using Kalshi BTC market {ticker}, close_ts={close_ts}[/cyan]")
-            self._log_event(f"New Kalshi market {ticker}, close_ts={close_ts}")
+            self._log_event(f"\n\n\nNew Kalshi market {ticker}, close_ts={close_ts}")
 
             slug = f"btc-updown-15m-{close_ts - 900}"
             p = self.poly.call_api("getMarketBySlug", {"slug": slug})

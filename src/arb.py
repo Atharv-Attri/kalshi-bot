@@ -555,45 +555,8 @@ class Arb:
                     )
 
                 if not entered_poly and self.poly_condition_id is not None:
-                    # Strat 1: YES Kalshi / NO Poly
-                    if gross_edge_yes >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
-                        poly_base_price = Pn
-
-                        msg = (
-                            f"Trigger: YES-Kalshi / NO-Poly "
-                            f"edge={gross_edge_yes:.4f} "
-                            f"Pn={Pn:.4f} final_exec_hint={poly_base_price + self.pad:.4f}"
-                        )
-                        print(f"[green]{msg}[/green]")
-                        self._log_event(msg)
-
-                        if poly_base_price and poly_base_price > 0:
-                            last_poly_attempt = now
-                            poly_side = "NO"
-                            kalshi_side = "YES"
-                            token_id = self.poly_no_id
-
-                            filled, order_id, resp = await self._poly_place_fok_async(
-                                token_id, poly_base_price, self.poly_condition_id
-                            )
-
-                            if filled:
-                                entered_poly = True
-                                msg = (
-                                    f"Entered Poly NO first for strat YES-Kalshi / NO-Poly "
-                                    f"(token_id={token_id}, order_id={order_id})"
-                                )
-                                print(f"[bold green]{msg}[/bold green]")
-                                self._log_event(msg)
-                            else:
-                                poly_side = None
-                                kalshi_side = None
-                                msg = "Poly NO FOK did not fill. Position not entered."
-                                print(f"[yellow]{msg}[/yellow]")
-                                self._log_event(msg)
-
-                    # Strat 2: NO Kalshi / YES Poly
-                    elif gross_edge_no >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
+                    # Strat 1 (FAVORED): NO Kalshi / YES Poly
+                    if gross_edge_no >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
                         poly_base_price = Py
 
                         msg = (
@@ -626,6 +589,43 @@ class Arb:
                                 poly_side = None
                                 kalshi_side = None
                                 msg = "Poly YES FOK did not fill. Position not entered."
+                                print(f"[yellow]{msg}[/yellow]")
+                                self._log_event(msg)
+
+                    # Strat 2: YES Kalshi / NO Poly
+                    elif gross_edge_yes >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
+                        poly_base_price = Pn
+
+                        msg = (
+                            f"Trigger: YES-Kalshi / NO-Poly "
+                            f"edge={gross_edge_yes:.4f} "
+                            f"Pn={Pn:.4f} final_exec_hint={poly_base_price + self.pad:.4f}"
+                        )
+                        print(f"[green]{msg}[/green]")
+                        self._log_event(msg)
+
+                        if poly_base_price and poly_base_price > 0:
+                            last_poly_attempt = now
+                            poly_side = "NO"
+                            kalshi_side = "YES"
+                            token_id = self.poly_no_id
+
+                            filled, order_id, resp = await self._poly_place_fok_async(
+                                token_id, poly_base_price, self.poly_condition_id
+                            )
+
+                            if filled:
+                                entered_poly = True
+                                msg = (
+                                    f"Entered Poly NO first for strat YES-Kalshi / NO-Poly "
+                                    f"(token_id={token_id}, order_id={order_id})"
+                                )
+                                print(f"[bold green]{msg}[/bold green]")
+                                self._log_event(msg)
+                            else:
+                                poly_side = None
+                                kalshi_side = None
+                                msg = "Poly NO FOK did not fill. Position not entered."
                                 print(f"[yellow]{msg}[/yellow]")
                                 self._log_event(msg)
 

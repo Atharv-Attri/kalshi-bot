@@ -26,12 +26,11 @@ from py_clob_client.clob_types import (
     OrderType,
 )
 from py_clob_client.order_builder.constants import BUY
+from py_clob_client.exceptions import PolyApiException
 
 import websockets
 
 from redeem import redeem
-
-from py_clob_client.exceptions import PolyApiException
 
 
 POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -118,7 +117,8 @@ class Arb:
 
         - base_price is the observed current price (YES or NO)
         - final_price = base_price + pad (limit price ceiling)
-        - amount is in USDC, not shares
+        - amount is in USDC, not shares. For BUY this is how many dollars
+          you are willing to spend.
         - If the order cannot be fully filled server side, we catch the
           PolyApiException and treat it as a non fill.
         """
@@ -135,7 +135,7 @@ class Arb:
             )
             print(f"[yellow]{msg}[/yellow]")
             self._log_event(msg)
-            return False, None, {"error": "amount_below_min", "amount": amount}
+            return False, None, {"success": False, "status": "skip", "error": "amount_below_min", "amount": amount}
 
         msg = (
             f"trying to buy on Poly token_id={token_id} "
@@ -160,13 +160,12 @@ class Arb:
             resp = self.auth_client.post_order(signed, OrderType.FOK)
 
         except PolyApiException as e:
-            # Typical case here: "order couldn't be fully filled. FOK orders are fully filled or killed."
+            # Typical case: "order couldn't be fully filled. FOK orders are fully filled or killed."
             err_payload = getattr(e, "error_message", None)
             msg = f"PolyApiException in FOK order: {err_payload or e}"
             print(f"[yellow]{msg}[/yellow]")
             self._log_event(msg)
 
-            # Treat as not filled so arb_monitor just keeps looking for the next edge
             resp = {
                 "success": False,
                 "status": "killed",
@@ -403,7 +402,6 @@ class Arb:
                         else:
                             self._handle_poly_event(msg)
 
-                # If we exit the async for without error, just loop and reconnect if still before close_ts
                 print("[yellow]Poly ws connection closed cleanly, reconnecting if before close.[/yellow]")
                 self._log_event("Poly ws closed cleanly, will reconnect")
 
@@ -413,7 +411,6 @@ class Arb:
                 await asyncio.sleep(1)
 
             except TimeoutError as e:
-                # timeout while closing connection or ping timeout
                 print(f"[red]Poly ws TimeoutError: {e}. Reconnecting...[/red]")
                 self._log_event(f"Poly ws TimeoutError: {e}")
                 await asyncio.sleep(1)
@@ -477,8 +474,7 @@ class Arb:
 
         1. Always buy Polymarket first.
         2. If Polymarket order is not filled, do not consider position entered.
-        3. If Polymarket filled but Kalshi hedge fails, keep retrying and
-           print in bold red each time.
+        3. If Polymarket filled but Kalshi hedge fails, keep retrying.
 
         Polymarket price used for execution:
             current Poly ask plus pad
@@ -489,11 +485,10 @@ class Arb:
         last_alert_yes = 0
         last_alert_no = 0
 
-        # v2 trading state for current market
         entered_poly = False
         kalshi_hedged = False
-        poly_side = None          # YES or NO
-        kalshi_side = None        # YES or NO
+        poly_side = None
+        kalshi_side = None
         last_poly_attempt = 0.0
         last_kalshi_attempt = 0.0
 
@@ -515,12 +510,10 @@ class Arb:
             Py = pb.get("yes_ask")
             Pn = pb.get("no_ask")
 
-            # Wait until we have all needed prices
             if None not in (Ky, Kn, Py, Pn):
                 gross_edge_yes = 1.0 - (Ky + Pn)  # YES on Kalshi / NO on Poly
                 gross_edge_no = 1.0 - (Kn + Py)   # NO on Kalshi / YES on Poly
 
-                # periodic status print
                 if now - last_print >= 2.0:
                     last_print = now
                     print(
@@ -530,11 +523,9 @@ class Arb:
                         f"(threshold={self.threshold:.4f})"
                     )
 
-                # If we do not yet have a Poly position, check for new arb and try Poly first
                 if not entered_poly and self.poly_condition_id is not None:
                     # Strat 1: YES Kalshi / NO Poly
                     if gross_edge_yes >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
-                        # Use current NO ask on Poly as base; final price will be Pn + pad
                         poly_base_price = Pn
 
                         msg = (
@@ -564,7 +555,6 @@ class Arb:
                                 print(f"[bold green]{msg}[/bold green]")
                                 self._log_event(msg)
                             else:
-                                # order not successful, do not mark entered
                                 poly_side = None
                                 kalshi_side = None
                                 msg = (
@@ -576,7 +566,6 @@ class Arb:
 
                     # Strat 2: NO Kalshi / YES Poly
                     elif gross_edge_no >= self.threshold and now - last_poly_attempt >= POLY_RETRY_COOLDOWN:
-                        # Use current YES ask on Poly as base; final price will be Py + pad
                         poly_base_price = Py
 
                         msg = (
@@ -615,7 +604,6 @@ class Arb:
                                 print(f"[yellow]{msg}[/yellow]")
                                 self._log_event(msg)
 
-                # If Poly is in and Kalshi is not hedged, keep retrying Kalshi
                 if entered_poly and not kalshi_hedged and kalshi_side is not None:
                     if now - last_kalshi_attempt >= KALSHI_RETRY_COOLDOWN:
                         last_kalshi_attempt = now
@@ -645,7 +633,6 @@ class Arb:
                             print(f"[bold red]{msg}[/bold red]")
                             self._log_event(msg)
 
-                # Also keep the pure alert behavior from before
                 if gross_edge_yes >= self.threshold and now - last_alert_yes >= 5.0:
                     last_alert_yes = now
                     msg = (
@@ -654,7 +641,6 @@ class Arb:
                         f"| Ky={Ky:.4f}, Pn={Pn:.4f}"
                     )
                     print(f"[bold yellow]{msg}[/bold yellow]")
-                    #self._log_event(msg)
 
                 if gross_edge_no >= self.threshold and now - last_alert_no >= 5.0:
                     last_alert_no = now
@@ -664,7 +650,6 @@ class Arb:
                         f"| Kn={Kn:.4f}, Py={Py:.4f}"
                     )
                     print(msg)
-                    #self._log_event(msg)
 
             await asyncio.sleep(0.2)
 
@@ -688,7 +673,6 @@ class Arb:
         last_condition_id = None
 
         while True:
-            # 1) Find Kalshi market
             mkts = self.kalshi.get_markets(
                 limit=1,
                 mve_filter="exclude",
@@ -708,7 +692,6 @@ class Arb:
             print(f"[cyan]v2: using Kalshi BTC market {ticker}, close_ts={close_ts}[/cyan]")
             self._log_event(f"New Kalshi market {ticker}, close_ts={close_ts}")
 
-            # 2) Match to Polymarket slug
             slug = f"btc-updown-15m-{close_ts - 900}"
             p = self.poly.call_api("getMarketBySlug", {"slug": slug})
 
@@ -730,14 +713,12 @@ class Arb:
                 f"Poly ids YES={yes_id} NO={no_id} conditionId={self.poly_condition_id}"
             )
 
-            # Run both WS feeds plus arb monitor for this market
             await asyncio.gather(
                 self._kalshi_ws_task(ticker, close_ts),
                 self._poly_ws_task([yes_id, no_id], close_ts),
                 self._arb_monitor_task(ticker, close_ts),
             )
 
-            # Market is done, attempt redemption for this condition
             last_condition_id = self.poly_condition_id
 
             if last_condition_id is not None:
@@ -757,7 +738,6 @@ class Arb:
                     print(f"[red]Redeem failed for {last_condition_id}: {e}[/red]")
                     self._log_event(f"Redeem failed for {last_condition_id}: {e}")
 
-            # Either move to next market, or stop if auto_refresh is False
             if not self.auto_refresh:
                 print("[yellow]auto_refresh is False. Exiting after one market.[/yellow]")
                 self._log_event("Exit v2 after one market (auto_refresh False)")
@@ -765,7 +745,6 @@ class Arb:
 
             print("[cyan]Refreshing to next open BTC market...[/cyan]")
             self._log_event("Refreshing to next market")
-            # brief pause before searching for next one
             await asyncio.sleep(5)
 
 

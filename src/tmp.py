@@ -1,154 +1,102 @@
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
+from dotenv import load_dotenv
+import os
 
-# - - CONFIG - - #
+load_dotenv()
 
-RPC_URLS = [
-    "https://polygon-rpc.com",
-    "https://1rpc.io/matic",
-    "https://rpc.ankr.com/polygon",
-]
+RPC = "https://polygon.drpc.org"
 
-CHAIN_ID = 137
+PRIVATE_KEY = os.getenv("POLY_PRIV_KEY")
+WALLET_RAW = os.getenv("WALLET_ADDRESS")
 
-# YOUR wallet
-priv_key = ""  # hex string from MetaMask export
-pub_key = ""  # 0x... same address you funded
+if not PRIVATE_KEY:
+    raise RuntimeError("POLY_PRIV_KEY is not set")
+if not WALLET_RAW:
+    raise RuntimeError("WALLET_ADDRESS is not set")
 
-# USDC.e and CTF contracts on Polygon
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e
-CTF_ADDRESS  = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"  # CTF (ERC1155)
+w3 = Web3(Web3.HTTPProvider(RPC))
+WALLET = Web3.to_checksum_address(WALLET_RAW)
 
-# Spenders that need approval
-SPENDERS = {
-    "ctf_exchange":      "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-    "negrisk_exchange":  "0xC5d563A36AE78145C45a50134d48A1215220f80a",
-    "negrisk_adapter":   "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
-}
+print("connected:", w3.is_connected())
+print("chain:", w3.eth.chain_id)
 
-# Allowance we want to set: max uint256
-MAX_ALLOWANCE = 2**256 - 1
-
-# Minimal ABIs
-erc20_approve_abi = [
+# ERC1155 ABI fragment for setApprovalForAll and isApprovedForAll
+ERC1155_ABI = [
     {
-        "constant": False,
-        "inputs": [
-            {"name": "_spender", "type": "address"},
-            {"name": "_value",   "type": "uint256"},
-        ],
-        "name": "approve",
-        "outputs": [{"name": "", "type": "bool"}],
-        "payable": False,
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
-
-erc1155_set_approval_abi = [
-    {
-        "inputs": [
-            {"internalType": "address", "name": "operator", "type": "address"},
-            {"internalType": "bool",    "name": "approved", "type": "bool"},
-        ],
         "name": "setApprovalForAll",
-        "outputs": [],
-        "stateMutability": "nonpayable",
         "type": "function",
-    }
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "operator", "type": "address"},
+            {"name": "approved", "type": "bool"},
+        ],
+        "outputs": [],
+    },
+    {
+        "name": "isApprovedForAll",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "operator", "type": "address"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+    },
 ]
 
-# - - CONNECT TO POLYGON - - #
+CONDITIONAL = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
 
-def get_web3():
-    last_error = None
-    for url in RPC_URLS:
-        print(f"Trying RPC: {url}")
-        w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 60}))
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        try:
-            if w3.is_connected():
-                block_number = w3.eth.block_number
-                print(f"Connected to {url}, block {block_number}")
-                return w3
-        except Exception as e:
-            print(f"Failed on {url}: {e}")
-            last_error = e
-    raise SystemExit(f"Could not connect to any Polygon RPC. Last error: {last_error}")
+SPENDERS = [
+    Web3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"),
+    Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a"),
+    Web3.to_checksum_address("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"),
+]
 
-web3 = get_web3()
+conditional = w3.eth.contract(address=CONDITIONAL, abi=ERC1155_ABI)
 
-acct = web3.to_checksum_address(pub_key)
-print("Account:", acct)
 
-usdc = web3.eth.contract(
-    address=web3.to_checksum_address(USDC_ADDRESS),
-    abi=erc20_approve_abi,
-)
-ctf = web3.eth.contract(
-    address=web3.to_checksum_address(CTF_ADDRESS),
-    abi=erc1155_set_approval_abi,
-)
+def is_approved(operator):
+    return conditional.functions.isApprovedForAll(WALLET, operator).call()
 
-gas_price = web3.eth.gas_price
-print("Gas price (wei):", gas_price)
 
-# - - TX SENDER - - #
+def approve_for_all(operator, nonce):
+    tx = conditional.functions.setApprovalForAll(
+        operator,
+        True
+    ).build_transaction(
+        {
+            "from": WALLET,
+            "nonce": nonce,
+            "gas": 100000,
+            "gasPrice": w3.to_wei("50", "gwei"),
+            "chainId": 137,
+        }
+    )
 
-def send_tx(tx_dict, label):
-    signed = web3.eth.account.sign_transaction(tx_dict, private_key=priv_key)
-    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
-    print(f"[{label}] sent:", tx_hash.hex())
-    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
-    status = "SUCCESS" if receipt.status == 1 else "FAILED"
-    print(f"[{label}] status: {status}, gas used: {receipt.gasUsed}")
-    print(f"  Explorer: https://polygonscan.com/tx/{tx_hash.hex()}")
-    if receipt.status != 1:
-        raise SystemExit(f"Transaction {label} failed")
-    return receipt
+    signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
 
-# - - MAIN - - #
+    print(f"SetApprovalForAll true for {operator}")
+    print("tx:", w3.to_hex(tx_hash))
+
+    return nonce + 1
+
 
 def main():
-    nonce = web3.eth.get_transaction_count(acct)
-    print("Starting nonce:", nonce)
+    nonce = w3.eth.get_transaction_count(WALLET, "pending")
 
-    for name, spender_raw in SPENDERS.items():
-        spender = web3.to_checksum_address(spender_raw)
+    print("\nCurrent Conditional Tokens approvals:\n")
+    for op in SPENDERS:
+        approved = is_approved(op)
+        print(f"Operator {op}: {approved}")
 
-        # 1) Approve USDC.e for this spender
-        print(f"\nApproving USDC.e for {name} ({spender})")
-        approve_tx = usdc.functions.approve(
-            spender,
-            MAX_ALLOWANCE,
-        ).build_transaction(
-            {
-                "chainId": CHAIN_ID,
-                "from": acct,
-                "nonce": nonce,
-                "gasPrice": gas_price,
-            }
-        )
-        send_tx(approve_tx, f"USDC.approve -> {name}")
-        nonce += 1
+    print("\nSending approvals where needed:\n")
+    for op in SPENDERS:
+        if is_approved(op):
+            print(f"Already approved for {op}, skipping")
+            continue
+        nonce = approve_for_all(op, nonce)
 
-        # 2) setApprovalForAll on CTF for this spender
-        print(f"Setting CTF setApprovalForAll for {name} ({spender})")
-        ctf_tx = ctf.functions.setApprovalForAll(
-            spender,
-            True,
-        ).build_transaction(
-            {
-                "chainId": CHAIN_ID,
-                "from": acct,
-                "nonce": nonce,
-                "gasPrice": gas_price,
-            }
-        )
-        send_tx(ctf_tx, f"CTF.setApprovalForAll -> {name}")
-        nonce += 1
-
-    print("\nAll approvals completed successfully.")
 
 if __name__ == "__main__":
     main()

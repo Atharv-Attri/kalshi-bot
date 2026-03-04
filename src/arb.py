@@ -39,9 +39,9 @@ POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 class Arb:
     def __init__(self, auto_refresh: bool = True):
         # Detection and execution parameters
-        self.threshold = 0.12   # gross edge needed to trigger
-        self.qty = 5
-        self.pad = 0.01         # padding added to both venues
+        self.threshold = 0.09   # gross edge needed to trigger
+        self.qty = 7
+        self.pad = 0.02         # padding added to both venues
         self.auto_refresh = auto_refresh
 
         load_dotenv(".env")
@@ -101,6 +101,43 @@ class Arb:
                 f.write(line)
         except Exception as e:
             print(f"[red]Failed to write arb.log: {e}[/red]")
+
+    # -------------------- Redeem worker --------------------
+
+    async def _redeem_after_delay(self, ticker: str, condition_id: str, delay_sec: int = 7 * 60):
+        """
+        Sleeps delay_sec, then tries to redeem condition_id.
+        Runs redeem() in a thread so it doesn't block the event loop.
+        """
+        if not condition_id:
+            return
+
+        try:
+            msg = f"Redeem task scheduled for {condition_id} (ticker={ticker}) in {delay_sec}s"
+            print(f"[cyan]{msg}[/cyan]")
+            self._log_event(msg)
+
+            await asyncio.sleep(delay_sec)
+
+            print("[yellow]Trying to redeem past Polymarket condition...[/yellow]")
+            self._log_event(f"Redeem start condition_id={condition_id}")
+
+            loop = asyncio.get_running_loop()
+            txn = await loop.run_in_executor(None, redeem, condition_id)
+
+            print(f"[green]Redeem tx: {txn}[/green]")
+            self._log_event(f"Redeem success condition_id={condition_id} tx={txn}")
+
+            try:
+                with open("reciept.txt", "a") as f:
+                    f.write(f"{ticker} - {condition_id} - {txn}\n")
+            except Exception as e:
+                print(f"[red]Failed to write reciept.txt: {e}[/red]")
+                self._log_event(f"Failed to write reciept.txt: {e}")
+
+        except Exception as e:
+            print(f"[red]Redeem failed for {condition_id}: {e}[/red]")
+            self._log_event(f"Redeem failed for {condition_id}: {e}")
 
     # -------------------- Helpers --------------------
 
@@ -319,14 +356,14 @@ class Arb:
                 return
             last_tick_print[ticker] = now
 
-            def fmt(v):
-                return f"{v:.4f}" if v is not None else "None"
-            return
-            print(
-                f"[KALSHI] {ticker} "
-                f"YES bid/ask={fmt(yes_bid)}/{fmt(yes_ask)} "
-                f"NO bid/ask={fmt(no_bid)}/{fmt(no_ask)}"
-            )
+            # Uncomment if you want printing
+            # def fmt(v):
+            #     return f"{v:.4f}" if v is not None else "None"
+            # print(
+            #     f"[KALSHI] {ticker} "
+            #     f"YES bid/ask={fmt(yes_bid)}/{fmt(yes_ask)} "
+            #     f"NO bid/ask={fmt(no_bid)}/{fmt(no_ask)}"
+            # )
 
         with Feed(self.kalshi) as feed:
 
@@ -446,26 +483,23 @@ class Arb:
         except Exception:
             ba = None
 
-        side = None
         if asset_id == self.poly_yes_id:
-            side = "YES"
             self.poly_book["yes_bid"] = bb
             self.poly_book["yes_ask"] = ba
         elif asset_id == self.poly_no_id:
-            side = "NO"
             self.poly_book["no_bid"] = bb
             self.poly_book["no_ask"] = ba
-
-        if side is None:
+        else:
             return
 
-        def fmt(v):
-            return f"{v:.4f}" if v is not None else "None"
-        return
-        print(
-            f"[POLY] side={side} asset_id={asset_id} "
-            f"best_bid={fmt(bb)} best_ask={fmt(ba)}"
-        )
+        # Uncomment if you want printing
+        # side = "YES" if asset_id == self.poly_yes_id else "NO"
+        # def fmt(v):
+        #     return f"{v:.4f}" if v is not None else "None"
+        # print(
+        #     f"[POLY] side={side} asset_id={asset_id} "
+        #     f"best_bid={fmt(bb)} best_ask={fmt(ba)}"
+        # )
 
     async def _arb_monitor_task(self, ticker: str, close_ts: int):
         """
@@ -475,9 +509,6 @@ class Arb:
         1. Always buy Polymarket first.
         2. If Polymarket order is not filled, do not consider position entered.
         3. If Polymarket filled but Kalshi hedge fails, keep retrying.
-
-        Polymarket price used for execution:
-            current Poly ask plus pad
 
         Stops shortly after close_ts.
         """
@@ -536,7 +567,7 @@ class Arb:
                         print(f"[green]{msg}[/green]")
                         self._log_event(msg)
 
-                        if poly_base_price > 0:
+                        if poly_base_price and poly_base_price > 0:
                             last_poly_attempt = now
                             poly_side = "NO"
                             kalshi_side = "YES"
@@ -557,10 +588,7 @@ class Arb:
                             else:
                                 poly_side = None
                                 kalshi_side = None
-                                msg = (
-                                    "Poly NO FOK did not fill. "
-                                    "Position not entered."
-                                )
+                                msg = "Poly NO FOK did not fill. Position not entered."
                                 print(f"[yellow]{msg}[/yellow]")
                                 self._log_event(msg)
 
@@ -576,7 +604,7 @@ class Arb:
                         print(f"[green]{msg}[/green]")
                         self._log_event(msg)
 
-                        if poly_base_price > 0:
+                        if poly_base_price and poly_base_price > 0:
                             last_poly_attempt = now
                             poly_side = "YES"
                             kalshi_side = "NO"
@@ -597,10 +625,7 @@ class Arb:
                             else:
                                 poly_side = None
                                 kalshi_side = None
-                                msg = (
-                                    "Poly YES FOK did not fill. "
-                                    "Position not entered."
-                                )
+                                msg = "Poly YES FOK did not fill. Position not entered."
                                 print(f"[yellow]{msg}[/yellow]")
                                 self._log_event(msg)
 
@@ -665,13 +690,11 @@ class Arb:
                 * Kalshi websocket
                 * Polymarket websocket
                 * Arb monitor that prints alerts and runs trading logic
-            - After market close, attempt redemption of the condition
-              and then refresh to the next open market.
+            - After market close, schedule redemption of the condition
+              (sleep 7 minutes, then redeem) and then refresh to next market.
 
         If auto_refresh is False, it runs for a single market then exits.
         """
-        last_condition_id = None
-
         while True:
             mkts = self.kalshi.get_markets(
                 limit=1,
@@ -722,21 +745,7 @@ class Arb:
             last_condition_id = self.poly_condition_id
 
             if last_condition_id is not None:
-                try:
-                    print("[yellow]Trying to redeem past Polymarket condition...[/yellow]")
-                    self._log_event(f"Redeem start condition_id={last_condition_id}")
-                    txn = redeem(last_condition_id)
-                    print(f"[green]Redeem tx: {txn}[/green]")
-                    self._log_event(f"Redeem success condition_id={last_condition_id} tx={txn}")
-                    try:
-                        with open("reciept.txt", "a") as f:
-                            f.write(f"{ticker} - {last_condition_id} - {txn}\n")
-                    except Exception as e:
-                        print(f"[red]Failed to write reciept.txt: {e}[/red]")
-                        self._log_event(f"Failed to write reciept.txt: {e}")
-                except Exception as e:
-                    print(f"[red]Redeem failed for {last_condition_id}: {e}[/red]")
-                    self._log_event(f"Redeem failed for {last_condition_id}: {e}")
+                asyncio.create_task(self._redeem_after_delay(ticker, last_condition_id, delay_sec=7 * 60))
 
             if not self.auto_refresh:
                 print("[yellow]auto_refresh is False. Exiting after one market.[/yellow]")
